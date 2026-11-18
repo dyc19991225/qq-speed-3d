@@ -21,6 +21,14 @@ interface SparkParticle {
   life: number;
 }
 
+function sampleShakeNoise(time: number): number {
+  const index = Math.floor(time);
+  const start = Math.sin(index * 127.1) * 43758.5453;
+  const end = Math.sin((index + 1) * 127.1) * 43758.5453;
+  const blend = THREE.MathUtils.smoothstep(time, index, index + 1);
+  return 2 * THREE.MathUtils.lerp(start - Math.floor(start), end - Math.floor(end), blend) - 1;
+}
+
 export class QQSpeedEngine {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -63,6 +71,7 @@ export class QQSpeedEngine {
 
   private camPos = new THREE.Vector3(0, 4, 10);
   private camLook = new THREE.Vector3(0, 1, 0);
+  private trauma = 0;
   private skidCooldown = 0;
   private lastTime = performance.now();
 
@@ -94,9 +103,15 @@ export class QQSpeedEngine {
   private wireCallbacks(): void {
     this.playerCtrl.onComboCallout = (c) => this.hud.showComboCallout(c);
     this.playerCtrl.onPlayMiniBoost = () => this.audio.playMiniBoost();
-    this.playerCtrl.onPlayNitro = (isCombo) => this.audio.playNitro(isCombo);
+    this.playerCtrl.onPlayNitro = (isCombo) => {
+      this.addTrauma(isCombo ? 0.36 : 0.22);
+      this.audio.playNitro(isCombo);
+    };
     this.playerCtrl.onPlayNitroReady = () => this.audio.playNitroReady();
-    this.playerCtrl.onPlayWallHit = () => this.audio.playWallHit();
+    this.playerCtrl.onPlayWallHit = () => {
+      this.addTrauma(0.55);
+      this.audio.playWallHit();
+    };
 
     this.hud.onStartRace = (sel) => {
       this.audio.unlock();
@@ -124,6 +139,10 @@ export class QQSpeedEngine {
     };
   }
 
+  private addTrauma(amount: number): void {
+    this.trauma = Math.min(1, this.trauma + amount);
+  }
+
   private loadRace(sel: HudSelection, stayInLobby: boolean): void {
     this.activeTrack = TRACKS[sel.trackId as TrackId];
     this.activeKartId = sel.kartId;
@@ -135,6 +154,7 @@ export class QQSpeedEngine {
     // Clear FX
     this.skidMarks = [];
     this.sparks = [];
+    this.trauma = 0;
 
     // Rebuild player kart mesh
     this.playerCtrl.spec = KART_SPECS[sel.kartId];
@@ -292,7 +312,10 @@ export class QQSpeedEngine {
 
           // Sparks
           const spMat = new THREE.MeshBasicMaterial({
-            color: this.playerCtrl.nitroBottles >= 1 ? 0x45d9ff : 0xffaa2b
+            color: this.playerCtrl.nitroBottles >= 1 ? 0x45d9ff : 0xffaa2b,
+            blending: THREE.AdditiveBlending,
+            transparent: true,
+            depthWrite: false
           });
           const sp = new THREE.Mesh(this.sparkGeo, spMat);
           sp.position.set(sx, this.playerCtrl.y + 0.14, sz);
@@ -336,8 +359,10 @@ export class QQSpeedEngine {
   }
 
   private loop(now: number): void {
-    const dt = Math.min(0.05, (now - this.lastTime) / 1000);
+    const rawDt = Math.max(0, (now - this.lastTime) / 1000);
+    const dt = Math.min(rawDt, 0.05);
     this.lastTime = now;
+    this.trauma = Math.max(0, this.trauma - 1.55 * dt);
 
     const { input, keyVis } = this.gatherInput();
 
@@ -424,19 +449,27 @@ export class QQSpeedEngine {
       this.playerCtrl.y + camHeight,
       this.playerCtrl.z + Math.cos(camYaw) * camDist
     );
-    this.camPos.lerp(desiredCamPos, Math.min(1, dt * 11));
+    this.camPos.lerp(desiredCamPos, 1 - Math.exp(-11 * dt));
     const desiredLook = new THREE.Vector3(
       this.playerCtrl.x - Math.sin(this.playerCtrl.headingYaw) * 6.0,
       this.playerCtrl.y + 1.15,
       this.playerCtrl.z - Math.cos(this.playerCtrl.headingYaw) * 6.0
     );
-    this.camLook.lerp(desiredLook, Math.min(1, dt * 14));
+    this.camLook.lerp(desiredLook, 1 - Math.exp(-14 * dt));
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLook);
 
+    const shake = this.trauma * this.trauma;
+    if (shake > 0) {
+      const shakeTime = (now / 1000) * 26;
+      this.camera.rotateX(shake * 0.075 * sampleShakeNoise(shakeTime));
+      this.camera.rotateY(shake * 0.06 * sampleShakeNoise(shakeTime + 17.3));
+      this.camera.rotateZ(shake * 0.11 * sampleShakeNoise(shakeTime + 41.7));
+    }
+
     const targetFov = 70 + Math.min(24, Math.max(0, (this.playerCtrl.speedKmh - 140) * 0.14));
     if (Math.abs(this.camera.fov - targetFov) > 0.1) {
-      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 8);
+      this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-8 * dt));
       this.camera.updateProjectionMatrix();
     }
 
